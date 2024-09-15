@@ -8,6 +8,10 @@ const (
 	CertificateAvailable   string = "Available"
 	CertificateProgressing string = "Progressing"
 	CertificateDegraded    string = "Degraded"
+
+	ReasonAvailable   string = "CertificateReady"
+	ReasonProgressing string = "CertificateInProgress"
+	ReasonDegraded    string = "CertificateFailed"
 )
 
 // SecretReference represents a Secret Reference.
