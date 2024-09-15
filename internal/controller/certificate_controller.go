@@ -48,7 +48,6 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, fmt.Errorf("could not fetch certificate resource: %+v", err)
 	}
 	finalizer := fmt.Sprintf("secrets/%v", certObj.Spec.SecretRef.Name)
-	log.Info("certObj status", "certObj.Status", certObj.Status) // remove it later
 	secretObj := &corev1.Secret{}
 
 	err = r.Get(ctx, client.ObjectKey{
@@ -56,84 +55,120 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		Name:      certObj.Spec.SecretRef.Name,
 	}, secretObj)
 
-	// deletion flow
-	if !certObj.DeletionTimestamp.IsZero() {
-		log.Info("deleting secret resource")
-		if err := r.deleteResource(ctx, secretObj); err != nil {
-			log.Error(err, "unable to delete secret resource")
-			return ctrl.Result{}, fmt.Errorf("unable to delete secret resource: %+v", err)
-		}
-		log.Info("secret Deleted", "secret", secretObj.Name)
-		controllerutil.RemoveFinalizer(certObj, finalizer)
-		r.Update(ctx, certObj)
-		return ctrl.Result{}, nil
-	}
-
 	switch {
 	case errors.IsNotFound(err):
 		log.Info("secret not found. Creating...")
 		if certObj.Status.Condition != nil && certObj.Status.Condition.Type == certsv1.CertificateAvailable {
-			certObj.Status.Condition = &metav1.Condition{}
+
 			secretObj := &corev1.Secret{}
-			if err := r.getSecret(ctx, secretObj, req.Namespace, *certObj.Status.SecretName); err != nil {
+			err := r.getSecret(ctx, secretObj, req.Namespace, *certObj.Status.SecretName)
+			if err != nil {
+				log.Error(err, "unable to fetch secret")
+				return ctrl.Result{}, fmt.Errorf("unable to fetch secret: %+v", err)
+			} else if errors.IsNotFound(err) {
 				log.Info("old secret not found. Proceeding..")
+				certObj.Status.Condition = &metav1.Condition{}
+			} else {
+				log.Info("deleting old secret", "secret", secretObj.Name)
+				err := r.deleteResource(ctx, secretObj)
+				if err != nil {
+					log.Error(err, "unable to delete old secret")
+				} else {
+					log.Info("secret deleted", "secret", secretObj.Name)
+
+					certObj.Status.Condition = &metav1.Condition{}
+				}
 			}
-			log.Info("deleting old secret", "secret", secretObj.Name)
-			if err := r.deleteResource(ctx, secretObj); err != nil {
-				log.Error(err, "unable to delete old secret")
-			}
-			log.Info("secret deleted", "secret", secretObj.Name)
 		}
 	case err != nil:
 		log.Error(err, "could not fetch secret")
 		return ctrl.Result{}, fmt.Errorf("could not fetch secret: %+v", err)
 	default:
 		log.Info("secret found", "secret", secretObj.Name)
-		match, err := validateResource(ctx, secretObj, certObj)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if match {
-			if certObj.Status.Condition.Type != certsv1.CertificateAvailable {
-				setCertStatusCondition(certObj, certsv1.CertificateAvailable, "Ca", "created secret")
-				if err := r.Status().Update(ctx, certObj); err != nil {
-					log.Error(err, "could not update available status")
-					return ctrl.Result{}, fmt.Errorf("could not update available status: %+v", err)
+		// deletion flow
+		if !certObj.DeletionTimestamp.IsZero() {
+			log.Info("deleting secret resource")
+			if err := r.deleteResource(ctx, secretObj); err != nil {
+				log.Error(err, "unable to delete secret resource")
+				return ctrl.Result{}, fmt.Errorf("unable to delete secret resource: %+v", err)
+			}
+			log.Info("secret Deleted", "secret", secretObj.Name)
+			if controllerutil.ContainsFinalizer(certObj, finalizer) {
+				controllerutil.RemoveFinalizer(certObj, finalizer)
+			}
+			r.Update(ctx, certObj)
+			return ctrl.Result{}, nil
+		} else {
+			// validation flow
+			match, err := validateResource(ctx, secretObj, certObj)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if match {
+				if (certObj.Status.Condition != nil) && (certObj.Status.Condition.Type != certsv1.CertificateAvailable) {
+					log.Info("setting status type Available")
+					setCertStatusCondition(certObj, certsv1.CertificateAvailable, certsv1.ReasonAvailable, "created secret")
+					if err := r.Status().Update(ctx, certObj); err != nil {
+						log.Error(err, "could not update status")
+						return ctrl.Result{}, fmt.Errorf("could not update status: %+v", err)
+					}
+				}
+				return ctrl.Result{}, nil
+			} else {
+				certObj.Status.Condition = &metav1.Condition{}
+				log.Info("deleting secret resource")
+				if err := r.deleteResource(ctx, secretObj); err != nil {
+					log.Error(err, "unable to delete secret")
+					return ctrl.Result{}, fmt.Errorf("unable to delete secret: %+v", err)
 				}
 			}
-			return ctrl.Result{}, nil
 		}
 	}
 	if certObj.Status.Condition == nil {
 		certObj.Status.Condition = &metav1.Condition{}
 	}
+
 	if certObj.Status.Condition.Type == "" {
-		setCertStatusCondition(certObj, certsv1.CertificateProgressing, "Cp", "creating secret")
+		log.Info("setting status type InProgress")
+		setCertStatusCondition(certObj, certsv1.CertificateProgressing, certsv1.ReasonProgressing, "creating secret")
 		if err := r.Status().Update(ctx, certObj); err != nil {
 			log.Error(err, "could not update progress status")
 			return ctrl.Result{}, fmt.Errorf("could not update progress status: %+v", err)
 		}
+
+		if certObj.Status.SecretName != nil {
+			if controllerutil.ContainsFinalizer(certObj, fmt.Sprintf("secrets/%v", *certObj.Status.SecretName)) {
+				controllerutil.RemoveFinalizer(certObj, fmt.Sprintf("secrets/%v", *certObj.Status.SecretName))
+			}
+		}
+
 		if !controllerutil.ContainsFinalizer(certObj, finalizer) {
 			controllerutil.AddFinalizer(certObj, finalizer)
-			r.Update(ctx, certObj)
+		}
+		if err := r.Update(ctx, certObj); err != nil {
+			log.Error(err, "unable to update finalizer")
+			return ctrl.Result{}, fmt.Errorf("unable to update finalizer: %+v", err)
 		}
 		if err := r.createResource(ctx, certObj); err != nil {
 			log.Error(err, "unable to create resource")
 			return ctrl.Result{}, fmt.Errorf("unable to create resource: %+v", err)
 		}
-	} else if certObj.Status.Condition.Type == certsv1.CertificateProgressing {
+
+	} else if (certObj.Status.Condition.Type == certsv1.CertificateProgressing) || (certObj.Status.Condition.Type == certsv1.CertificateDegraded) {
 		err := r.createResource(ctx, certObj)
 		if !errors.IsNotFound(err) {
 			log.Info("secret exists")
 			return ctrl.Result{}, fmt.Errorf("secret exists %+v", err)
 		} else if err != nil {
 			log.Error(err, "unable to create resource")
-			log.Info("setting degrade status")
+			if certObj.Status.Condition.Type != certsv1.CertificateDegraded {
+				log.Info("setting status type Degraded")
 
-			setCertStatusCondition(certObj, certsv1.CertificateDegraded, "Cd", err.Error())
-			if err := r.Status().Update(ctx, certObj); err != nil {
-				log.Error(err, "could not update degrade  status")
-				return ctrl.Result{}, fmt.Errorf("could not update degrade status: %+v", err)
+				setCertStatusCondition(certObj, certsv1.CertificateDegraded, certsv1.ReasonDegraded, err.Error())
+				if err := r.Status().Update(ctx, certObj); err != nil {
+					log.Error(err, "could not update degrade  status")
+					return ctrl.Result{}, fmt.Errorf("could not update degrade status: %+v", err)
+				}
 			}
 			return ctrl.Result{}, fmt.Errorf("unable to create resource: %+v", err)
 		}
@@ -163,9 +198,10 @@ func (r *CertificateReconciler) createResource(ctx context.Context, certObj *cer
 	}
 	secretObj := setSecret(certObj, certPEM, keyPEM)
 	if err := r.Create(ctx, secretObj); err != nil {
+		log.Error(err, "unable to create secret")
 		return err
 	}
-	log.Info("successfully created secret")
+	log.Info("successfully created secret", "secret", secretObj.Name)
 	return nil
 }
 
