@@ -8,6 +8,7 @@ rules:
   - certs.k8c.io
   resources:
   - certificates
+  - secrets
   verbs:
   - create
   - delete

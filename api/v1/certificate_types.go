@@ -4,6 +4,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	CertificateAvailable   string = "Available"
+	CertificateProgressing string = "Progressing"
+	CertificateDegraded    string = "Degraded"
+)
+
 // SecretReference represents a Secret Reference.
 type SecretReference struct {
 
@@ -38,22 +44,25 @@ type CertificateStatus struct {
 
 	// Condition contains details for one aspect of the current state of this API Resource.
 	// +optional
-	Condition metav1.Condition `json:"condition"`
+	Condition *metav1.Condition `json:"condition,omitempty"`
 
 	// Name of the Secret object which is created.
 	// +optional
-	SecretName string `json:"secretName"`
+	SecretName *string `json:"secretName,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Status", type="string", JSONPath=".status.condition.type", description="current status"
 
 // Certificate is the Schema for the certificates API
 type Certificate struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   CertificateSpec   `json:"spec,omitempty"`
+	// +kubebuilder:validation:Required
+	Spec CertificateSpec `json:"spec,omitempty"`
+
 	Status CertificateStatus `json:"status,omitempty"`
 }
 

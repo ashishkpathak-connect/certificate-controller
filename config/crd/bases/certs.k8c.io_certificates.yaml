@@ -14,7 +14,12 @@ spec:
     singular: certificate
   scope: Namespaced
   versions:
-  - name: v1
+  - additionalPrinterColumns:
+    - description: current status
+      jsonPath: .status.condition.type
+      name: Status
+      type: string
+    name: v1
     schema:
       openAPIV3Schema:
         description: Certificate is the Schema for the certificates API
@@ -130,6 +135,8 @@ spec:
                 description: Name of the Secret object which is created.
                 type: string
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true
