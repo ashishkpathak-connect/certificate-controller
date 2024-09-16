@@ -41,8 +41,7 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	switch {
 	case errors.IsNotFound(err):
-		log.Error(err, "unable to fetch certificate resource")
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	case err != nil:
 		log.Error(err, "could not fetch certificate resource")
 		return ctrl.Result{}, fmt.Errorf("could not fetch certificate resource: %+v", err)
@@ -115,12 +114,17 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				}
 				return ctrl.Result{}, nil
 			} else {
-				certObj.Status.Condition = &metav1.Condition{}
-				log.Info("deleting secret resource")
-				if err := r.deleteResource(ctx, secretObj); err != nil {
-					log.Error(err, "unable to delete secret")
+				log.Info("setting status type InProgress")
+				setCertStatusCondition(certObj, certsv1.CertificateProgressing, certsv1.ReasonProgressing, "creating secret")
+				if err := r.Status().Update(ctx, certObj); err != nil {
+					log.Error(err, "could not update progress status")
+					return ctrl.Result{}, fmt.Errorf("could not update progress status: %+v", err)
+				}
+				if err := r.updateResource(ctx, secretObj, certObj); err != nil {
+					log.Error(err, "unable to update resource")
 					return ctrl.Result{}, fmt.Errorf("unable to delete secret: %+v", err)
 				}
+				return ctrl.Result{}, nil
 			}
 		}
 	}
@@ -257,6 +261,23 @@ func (r *CertificateReconciler) deleteResource(ctx context.Context, secretObj *c
 	if err := r.Delete(ctx, secretObj); err != nil {
 		return err
 	}
+	return nil
+}
+
+func (r *CertificateReconciler) updateResource(ctx context.Context, secretObj *corev1.Secret, certObj *certsv1.Certificate) error {
+	log := log.FromContext(ctx)
+	certPEM, keyPEM, err := createSelfSignedCert(ctx, certObj)
+	if err != nil {
+		return err
+	}
+
+	secretObj.Data[corev1.TLSCertKey] = certPEM
+	secretObj.Data[corev1.TLSPrivateKeyKey] = keyPEM
+	if err := r.Update(ctx, secretObj); err != nil {
+		log.Error(err, "unable to update secret")
+		return err
+	}
+	log.Info("successfully updated secret", "secret", secretObj.Name)
 	return nil
 }
 
