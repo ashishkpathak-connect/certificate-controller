@@ -14,7 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	certsv1 "certificate-controller/api/v1"
-	controller "certificate-controller/internal"
+	"certificate-controller/internal/certs"
 )
 
 // CertificateReconciler reconciles a Certificate object
@@ -46,17 +46,20 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		log.Error(err, "could not fetch certificate resource")
 		return ctrl.Result{}, fmt.Errorf("could not fetch certificate resource: %+v", err)
 	}
+
 	finalizer := fmt.Sprintf("secrets/%v", certObj.Spec.SecretRef.Name)
+
 	secretObj := &corev1.Secret{}
 
-	err = r.Get(ctx, client.ObjectKey{
-		Namespace: req.Namespace,
-		Name:      certObj.Spec.SecretRef.Name,
-	}, secretObj)
+	// Fetch secret
+	err = r.getSecret(ctx, secretObj, req.Namespace, certObj.Spec.SecretRef.Name)
 
 	switch {
+	// The below case is for scenarios wherein secret is not Present.
+	// Secret would be missing for new creation flow or update flow(i.e., update to ".spec.secretRef.name")
 	case errors.IsNotFound(err):
 		log.Info("secret not found. Creating...")
+		// Checks for old secret and delete in case of update flow(i.e., update to ".spec.secretRef.name")
 		if certObj.Status.Condition != nil && certObj.Status.Condition.Type == certsv1.CertificateAvailable {
 
 			secretObj := &corev1.Secret{}
@@ -66,22 +69,25 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				return ctrl.Result{}, fmt.Errorf("unable to fetch secret: %+v", err)
 			} else if errors.IsNotFound(err) {
 				log.Info("old secret not found. Proceeding..")
+				// Reset .status.condition to make it go through the creation flow.
 				certObj.Status.Condition = &metav1.Condition{}
 			} else {
 				log.Info("deleting old secret", "secret", secretObj.Name)
 				err := r.deleteResource(ctx, secretObj)
 				if err != nil {
-					log.Error(err, "unable to delete old secret")
+					// Proceed if unable to delete secret
+					log.Error(err, "unable to delete old secret..Proceeding")
 				} else {
-					log.Info("secret deleted", "secret", secretObj.Name)
-
+					// Reset .status.condition to make it go through the creation flow.
 					certObj.Status.Condition = &metav1.Condition{}
 				}
 			}
 		}
+	// The below case is for scenarios when secret is not retrievable due to etcd slowness, API server timeouts etc
 	case err != nil:
 		log.Error(err, "could not fetch secret")
 		return ctrl.Result{}, fmt.Errorf("could not fetch secret: %+v", err)
+	// The below case is for scenario when secret exists.
 	default:
 		log.Info("secret found", "secret", secretObj.Name)
 		// deletion flow
@@ -95,31 +101,38 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			if controllerutil.ContainsFinalizer(certObj, finalizer) {
 				controllerutil.RemoveFinalizer(certObj, finalizer)
 			}
-			r.Update(ctx, certObj)
+			log.Info("removing finalizer")
+			if err := r.Update(ctx, certObj); err != nil {
+				log.Error(err, "unable to remove finalizer")
+				return ctrl.Result{}, fmt.Errorf("unable to remove finalizer: %+v", err)
+			}
 			return ctrl.Result{}, nil
 		} else {
-			// validation flow
+			// Validate contents of secret w.r.t .spec of CR i.e., desired vs actual
 			match, err := validateResource(ctx, secretObj, certObj)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
+			// Secret contents matches .spec of CR
 			if match {
+				log.Info("secret contents match .spec")
+				// Update status to available if not set else skip.
 				if (certObj.Status.Condition != nil) && (certObj.Status.Condition.Type != certsv1.CertificateAvailable) {
-					log.Info("setting status type Available")
-					setCertStatusCondition(certObj, certsv1.CertificateAvailable, certsv1.ReasonAvailable, "created secret")
-					if err := r.Status().Update(ctx, certObj); err != nil {
-						log.Error(err, "could not update status")
-						return ctrl.Result{}, fmt.Errorf("could not update status: %+v", err)
+					if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateAvailable, certsv1.ReasonAvailable, "created secret"); err != nil {
+						log.Error(err, "unable to update status type Available")
+						return ctrl.Result{}, fmt.Errorf("unable to update status type Available: %+v", err)
 					}
 				}
 				return ctrl.Result{}, nil
 			} else {
-				log.Info("setting status type InProgress")
-				setCertStatusCondition(certObj, certsv1.CertificateProgressing, certsv1.ReasonProgressing, "creating secret")
-				if err := r.Status().Update(ctx, certObj); err != nil {
+				// Secret contents does not match .spec of CR
+				// Update secret
+				log.Info("secret contents does not match .spec")
+				if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateProgressing, certsv1.ReasonProgressing, "creating secret"); err != nil {
 					log.Error(err, "could not update progress status")
 					return ctrl.Result{}, fmt.Errorf("could not update progress status: %+v", err)
 				}
+				log.Info("updating secret")
 				if err := r.updateResource(ctx, secretObj, certObj); err != nil {
 					log.Error(err, "unable to update resource")
 					return ctrl.Result{}, fmt.Errorf("unable to delete secret: %+v", err)
@@ -128,37 +141,46 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 		}
 	}
+	// Initialize .status.condition to make it go through the creation flow.
 	if certObj.Status.Condition == nil {
 		certObj.Status.Condition = &metav1.Condition{}
 	}
 
+	// Creation flow
+	// Updates status to InProgress and checks/remove if old finalizer is present(in case of Update)
+	// Attempts to create Resource. If failed, starts another Reconcile loop.
 	if certObj.Status.Condition.Type == "" {
-		log.Info("setting status type InProgress")
-		setCertStatusCondition(certObj, certsv1.CertificateProgressing, certsv1.ReasonProgressing, "creating secret")
-		if err := r.Status().Update(ctx, certObj); err != nil {
-			log.Error(err, "could not update progress status")
-			return ctrl.Result{}, fmt.Errorf("could not update progress status: %+v", err)
+		if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateProgressing, certsv1.ReasonProgressing, "creating secret"); err != nil {
+			log.Error(err, "unable to update status type InProgress")
+			return ctrl.Result{}, fmt.Errorf("unable to update status type InProgress: %+v", err)
 		}
-
+		// Removes old finalizer if present
 		if certObj.Status.SecretName != nil {
 			if controllerutil.ContainsFinalizer(certObj, fmt.Sprintf("secrets/%v", *certObj.Status.SecretName)) {
 				controllerutil.RemoveFinalizer(certObj, fmt.Sprintf("secrets/%v", *certObj.Status.SecretName))
 			}
 		}
-
+		// Adds finalizer
 		if !controllerutil.ContainsFinalizer(certObj, finalizer) {
 			controllerutil.AddFinalizer(certObj, finalizer)
 		}
+		log.Info("adding finalizer")
 		if err := r.Update(ctx, certObj); err != nil {
-			log.Error(err, "unable to update finalizer")
-			return ctrl.Result{}, fmt.Errorf("unable to update finalizer: %+v", err)
+			log.Error(err, "unable to add finalizer")
+			return ctrl.Result{}, fmt.Errorf("unable to add finalizer: %+v", err)
 		}
+		log.Info("creating resource")
 		if err := r.createResource(ctx, certObj); err != nil {
+
 			log.Error(err, "unable to create resource")
 			return ctrl.Result{}, fmt.Errorf("unable to create resource: %+v", err)
 		}
 
 	} else if (certObj.Status.Condition.Type == certsv1.CertificateProgressing) || (certObj.Status.Condition.Type == certsv1.CertificateDegraded) {
+		// Creation flow second attempt before marking status Degraded.
+		// Attempts to create Resource. If failed marks status as Degraded.
+		// Subsequent Reconcile loop with status Degraded will go through below block.
+		log.Info("creating resource")
 		err := r.createResource(ctx, certObj)
 		if !errors.IsNotFound(err) {
 			log.Info("secret exists")
@@ -166,12 +188,9 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		} else if err != nil {
 			log.Error(err, "unable to create resource")
 			if certObj.Status.Condition.Type != certsv1.CertificateDegraded {
-				log.Info("setting status type Degraded")
-
-				setCertStatusCondition(certObj, certsv1.CertificateDegraded, certsv1.ReasonDegraded, err.Error())
-				if err := r.Status().Update(ctx, certObj); err != nil {
-					log.Error(err, "could not update degrade  status")
-					return ctrl.Result{}, fmt.Errorf("could not update degrade status: %+v", err)
+				if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateDegraded, certsv1.ReasonDegraded, err.Error()); err != nil {
+					log.Error(err, "unable to update status type Degraded")
+					return ctrl.Result{}, fmt.Errorf("unable to update status type Degraded: %+v", err)
 				}
 			}
 			return ctrl.Result{}, fmt.Errorf("unable to create resource: %+v", err)
@@ -182,8 +201,8 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 }
 
-func setCertStatusCondition(certObj *certsv1.Certificate, conditionType string, reason, message string) {
-
+func (r *CertificateReconciler) updateCertStatus(ctx context.Context, certObj *certsv1.Certificate, conditionType string, reason, message string) error {
+	log := log.FromContext(ctx)
 	certObj.Status.Condition.LastTransitionTime = metav1.Now()
 	certObj.Status.Condition.Type = conditionType
 	certObj.Status.Condition.Status = metav1.ConditionTrue
@@ -192,6 +211,12 @@ func setCertStatusCondition(certObj *certsv1.Certificate, conditionType string, 
 	if certObj.Status.Condition.Type == certsv1.CertificateAvailable {
 		certObj.Status.SecretName = &certObj.Spec.SecretRef.Name
 	}
+	log.Info("updating status", "status", certObj.Status)
+	if err := r.Status().Update(ctx, certObj); err != nil {
+		return err
+	}
+	log.Info("status updated successfully")
+	return nil
 }
 
 func (r *CertificateReconciler) createResource(ctx context.Context, certObj *certsv1.Certificate) error {
@@ -205,16 +230,17 @@ func (r *CertificateReconciler) createResource(ctx context.Context, certObj *cer
 		log.Error(err, "unable to create secret")
 		return err
 	}
-	log.Info("successfully created secret", "secret", secretObj.Name)
+	log.Info("created secret successfully", "secret", secretObj.Name)
 	return nil
 }
 
+// Generates a Self Signed Certificate and Private key based on .spec.dnsName and .spec.validity of CR
 func createSelfSignedCert(ctx context.Context, certObj *certsv1.Certificate) ([]byte, []byte, error) {
-	ssCert := &controller.SelfSignedCert{
+	ssCertObj := &certs.SelfSignedCert{
 		Domain:   certObj.Spec.DNSName,
 		Validity: certObj.Spec.Validity,
 	}
-	certPEM, keyPEM, err := ssCert.Create(ctx, controller.PrivateKeyBitSize)
+	certPEM, keyPEM, err := ssCertObj.Create(ctx, certs.PrivateKeyBitSize)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -226,6 +252,12 @@ func setSecret(certObj *certsv1.Certificate, certPEM, keyPEM []byte) *corev1.Sec
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      certObj.Spec.SecretRef.Name,
 			Namespace: certObj.Namespace,
+			Annotations: map[string]string{
+				"certs.k8c.io/managed-by": certObj.Name,
+			},
+			Labels: map[string]string{
+				"certs.k8c.io/name": certObj.Spec.SecretRef.Name,
+			},
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
@@ -238,7 +270,7 @@ func setSecret(certObj *certsv1.Certificate, certPEM, keyPEM []byte) *corev1.Sec
 
 func validateResource(ctx context.Context, secretObj *corev1.Secret, certObj *certsv1.Certificate) (bool, error) {
 	// Read certificate
-	ssCert := &controller.SelfSignedCert{}
+	ssCert := &certs.SelfSignedCert{}
 	if err := ssCert.Read(ctx, secretObj); err != nil {
 		return false, err
 	}
@@ -258,9 +290,11 @@ func (r *CertificateReconciler) getSecret(ctx context.Context, secretObj *corev1
 }
 
 func (r *CertificateReconciler) deleteResource(ctx context.Context, secretObj *corev1.Secret) error {
+	log := log.FromContext(ctx)
 	if err := r.Delete(ctx, secretObj); err != nil {
 		return err
 	}
+	log.Info("deleted secret successfully", "secret", secretObj.Name)
 	return nil
 }
 
