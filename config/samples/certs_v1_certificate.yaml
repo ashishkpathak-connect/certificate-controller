@@ -1,9 +1,10 @@
 apiVersion: certs.k8c.io/v1
 kind: Certificate
 metadata:
-  labels:
-    app.kubernetes.io/name: certificate-controller
-    app.kubernetes.io/managed-by: kustomize
-  name: certificate-sample
+  name: my-certificate
+  namespace: default
 spec:
-  # TODO(user): Add fields here
+  dnsName: example.k8c.io
+  validity: 360d
+  secretRef:
+    name: my-certificate-secret

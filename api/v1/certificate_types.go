@@ -5,13 +5,23 @@ import (
 )
 
 const (
-	CertificateAvailable   string = "Available"
-	CertificateProgressing string = "Progressing"
-	CertificateDegraded    string = "Degraded"
+	// Constants for status update
+	CertificateTypeAvailable   string = "Available"
+	CertificateTypeProgressing string = "Progressing"
+	CertificateTypeDegraded    string = "Degraded"
 
-	ReasonAvailable   string = "CertificateReady"
-	ReasonProgressing string = "CertificateInProgress"
-	ReasonDegraded    string = "CertificateFailed"
+	CertificateReasonAvailable   string = "CertificateReady"
+	CertificateReasonProgressing string = "CertificateInProgress"
+	CertificateReasonDegraded    string = "CertificateFailed"
+
+	// Constants for emitting events.
+	EventReasonCreated  string = "CreatedSecret"
+	EventReasonCreating string = "CreatingSecret"
+	EventReasonFailed   string = "FailedCreatingSecret"
+	EventReasonDeleted  string = "DeletedSecret"
+
+	EventTypeNormal string = "Normal"
+	EvenTypeWarning string = "Warning"
 )
 
 // SecretReference represents a Secret Reference.

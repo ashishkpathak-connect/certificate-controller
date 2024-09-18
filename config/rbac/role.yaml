@@ -8,7 +8,6 @@ rules:
   - certs.k8c.io
   resources:
   - certificates
-  - secrets
   verbs:
   - create
   - delete
@@ -31,3 +30,22 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

@@ -3,30 +3,63 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	certsv1 "certificate-controller/api/v1"
 	"certificate-controller/internal/certs"
 )
 
+var (
+	// Custom metric.
+	// Define a counter metric to track the number of certificates in Available/Degraded states.
+	certStatus = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "certificate_status",
+			Help: "Tracks status related to certificate resources available and degraded.",
+		},
+		[]string{"status", "name", "namespace"},
+	)
+
+	// Custom metric.
+	// Define a counter metric to track creation/deletion events related to secrets.
+	secretEvents = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "secret_events",
+			Help: "Tracks events related to secret creation and deletion.",
+		},
+		[]string{"event", "name", "namespace"},
+	)
+)
+
 // CertificateReconciler reconciles a Certificate object
 type CertificateReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
+}
+
+func init() {
+	// Register custom metrics with the global prometheus registry
+	metrics.Registry.MustRegister(certStatus, secretEvents)
 }
 
 // +kubebuilder:rbac:groups=certs.k8c.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=certs.k8c.io,resources=certificates/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=certs.k8c.io,resources=certificates/finalizers,verbs=update
-// +kubebuilder:rbac:groups=certs.k8c.io,resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -58,30 +91,33 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// The below case is for scenarios wherein secret is not Present.
 	// Secret would be missing for new creation flow or update flow(i.e., update to ".spec.secretRef.name")
 	case errors.IsNotFound(err):
-		log.Info("secret not found. Creating...")
+		log.V(1).Info("secret not found. Creating...")
 		// Checks for old secret and delete in case of update flow(i.e., update to ".spec.secretRef.name")
-		if certObj.Status.Condition != nil && certObj.Status.Condition.Type == certsv1.CertificateAvailable {
+		if certObj.Status.Condition != nil && certObj.Status.Condition.Type == certsv1.CertificateTypeAvailable {
 
 			secretObj := &corev1.Secret{}
+			// Fetch old secret. If true delete else proceed as we avoid making multiple attempts
+			// to fetch old secret and delete.
 			err := r.getSecret(ctx, secretObj, req.Namespace, *certObj.Status.SecretName)
-			if err != nil {
+			if errors.IsNotFound(err) {
+				log.V(1).Info("old secret not found. Proceeding..")
+			} else if err != nil {
 				log.Error(err, "unable to fetch secret")
-				return ctrl.Result{}, fmt.Errorf("unable to fetch secret: %+v", err)
-			} else if errors.IsNotFound(err) {
-				log.Info("old secret not found. Proceeding..")
-				// Reset .status.condition to make it go through the creation flow.
-				certObj.Status.Condition = &metav1.Condition{}
+				log.V(1).Info("Proceeding..")
 			} else {
-				log.Info("deleting old secret", "secret", secretObj.Name)
+				log.V(1).Info("deleting old secret", "secret", secretObj.Name)
 				err := r.deleteResource(ctx, secretObj)
 				if err != nil {
 					// Proceed if unable to delete secret
 					log.Error(err, "unable to delete old secret..Proceeding")
 				} else {
-					// Reset .status.condition to make it go through the creation flow.
-					certObj.Status.Condition = &metav1.Condition{}
+					r.Recorder.Event(certObj, certsv1.EventTypeNormal, certsv1.EventReasonDeleted, fmt.Sprintf("deleted secrets/%v", *certObj.Status.SecretName))
+					// Incrementing the secretEvents counter since resource is deleted.
+					secretEvents.WithLabelValues(certsv1.EventReasonDeleted, secretObj.Name, secretObj.Namespace).Inc()
 				}
 			}
+			// Reset .status.condition to make it go through the creation flow.
+			certObj.Status.Condition = &metav1.Condition{}
 		}
 	// The below case is for scenarios when secret is not retrievable due to etcd slowness, API server timeouts etc
 	case err != nil:
@@ -89,54 +125,62 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, fmt.Errorf("could not fetch secret: %+v", err)
 	// The below case is for scenario when secret exists.
 	default:
-		log.Info("secret found", "secret", secretObj.Name)
-		// deletion flow
+		log.V(1).Info("secret found", "secret", secretObj.Name)
+		// Deletion flow
 		if !certObj.DeletionTimestamp.IsZero() {
 			log.Info("deleting secret resource")
 			if err := r.deleteResource(ctx, secretObj); err != nil {
 				log.Error(err, "unable to delete secret resource")
 				return ctrl.Result{}, fmt.Errorf("unable to delete secret resource: %+v", err)
 			}
-			log.Info("secret Deleted", "secret", secretObj.Name)
+			r.Recorder.Event(certObj, certsv1.EventTypeNormal, certsv1.EventReasonDeleted, fmt.Sprintf("deleted secrets/%v", certObj.Spec.SecretRef.Name))
+			secretEvents.WithLabelValues(certsv1.EventReasonDeleted, secretObj.Name, secretObj.Namespace).Inc()
 			if controllerutil.ContainsFinalizer(certObj, finalizer) {
 				controllerutil.RemoveFinalizer(certObj, finalizer)
 			}
-			log.Info("removing finalizer")
+			log.V(1).Info("removing finalizer")
 			if err := r.Update(ctx, certObj); err != nil {
 				log.Error(err, "unable to remove finalizer")
 				return ctrl.Result{}, fmt.Errorf("unable to remove finalizer: %+v", err)
 			}
 			return ctrl.Result{}, nil
 		} else {
-			// Validate contents of secret w.r.t .spec of CR i.e., desired vs actual
+			// Validate contents of secret w.r.t .spec of CR i.e., actual vs desired
 			match, err := validateResource(ctx, secretObj, certObj)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
 			// Secret contents matches .spec of CR
 			if match {
-				log.Info("secret contents match .spec")
+				log.V(0).Info("secret contents match .spec of certificates CR")
 				// Update status to available if not set else skip.
-				if (certObj.Status.Condition != nil) && (certObj.Status.Condition.Type != certsv1.CertificateAvailable) {
-					if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateAvailable, certsv1.ReasonAvailable, "created secret"); err != nil {
+				if (certObj.Status.Condition != nil) && (certObj.Status.Condition.Type != certsv1.CertificateTypeAvailable) {
+					if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateTypeAvailable, certsv1.CertificateReasonAvailable, "created secret"); err != nil {
 						log.Error(err, "unable to update status type Available")
 						return ctrl.Result{}, fmt.Errorf("unable to update status type Available: %+v", err)
 					}
+					// Emitting event since resource is created and .status.condition.type is updated to Available.
+					r.Recorder.Event(certObj, certsv1.EventTypeNormal, certsv1.EventReasonCreated, fmt.Sprintf("created secrets/%v", secretObj.Name))
+					// Incrementing counter of certStatus for .status.condition.type Available.
+					certStatus.WithLabelValues(certsv1.CertificateTypeAvailable, certObj.Name, certObj.Namespace).Inc()
 				}
 				return ctrl.Result{}, nil
 			} else {
 				// Secret contents does not match .spec of CR
 				// Update secret
-				log.Info("secret contents does not match .spec")
-				if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateProgressing, certsv1.ReasonProgressing, "creating secret"); err != nil {
+				log.V(1).Info("secret contents does not match spec of certificates CR")
+				if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateTypeProgressing, certsv1.CertificateReasonProgressing, "creating secret"); err != nil {
 					log.Error(err, "could not update progress status")
 					return ctrl.Result{}, fmt.Errorf("could not update progress status: %+v", err)
 				}
-				log.Info("updating secret")
+				// Emitting event since resource is being updated and .status.condition.type is updated to Progressing.
+				r.Recorder.Event(certObj, certsv1.EventTypeNormal, certsv1.EventReasonCreating, fmt.Sprintf("creating secrets/%v", certObj.Spec.SecretRef.Name))
+				log.V(1).Info("updating secret")
 				if err := r.updateResource(ctx, secretObj, certObj); err != nil {
 					log.Error(err, "unable to update resource")
-					return ctrl.Result{}, fmt.Errorf("unable to delete secret: %+v", err)
+					return ctrl.Result{}, fmt.Errorf("unable to update resource: %+v", err)
 				}
+
 				return ctrl.Result{}, nil
 			}
 		}
@@ -150,10 +194,13 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Updates status to InProgress and checks/remove if old finalizer is present(in case of Update)
 	// Attempts to create Resource. If failed, starts another Reconcile loop.
 	if certObj.Status.Condition.Type == "" {
-		if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateProgressing, certsv1.ReasonProgressing, "creating secret"); err != nil {
+		if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateTypeProgressing, certsv1.CertificateReasonProgressing, "creating secret"); err != nil {
 			log.Error(err, "unable to update status type InProgress")
 			return ctrl.Result{}, fmt.Errorf("unable to update status type InProgress: %+v", err)
 		}
+		// Emitting event since resource is being updated.
+		r.Recorder.Event(certObj, certsv1.EventTypeNormal, certsv1.EventReasonCreating, fmt.Sprintf("creating secrets/%v", certObj.Spec.SecretRef.Name))
+
 		// Removes old finalizer if present
 		if certObj.Status.SecretName != nil {
 			if controllerutil.ContainsFinalizer(certObj, fmt.Sprintf("secrets/%v", *certObj.Status.SecretName)) {
@@ -164,37 +211,45 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if !controllerutil.ContainsFinalizer(certObj, finalizer) {
 			controllerutil.AddFinalizer(certObj, finalizer)
 		}
-		log.Info("adding finalizer")
+		log.V(1).Info("adding finalizer")
 		if err := r.Update(ctx, certObj); err != nil {
 			log.Error(err, "unable to add finalizer")
 			return ctrl.Result{}, fmt.Errorf("unable to add finalizer: %+v", err)
 		}
-		log.Info("creating resource")
+
+		log.V(1).Info("creating resource")
 		if err := r.createResource(ctx, certObj); err != nil {
 
 			log.Error(err, "unable to create resource")
 			return ctrl.Result{}, fmt.Errorf("unable to create resource: %+v", err)
 		}
+		// Since resource creation i.e., secret is successful, increment the counter secretEvents.
+		secretEvents.WithLabelValues(certsv1.EventReasonCreated, certObj.Spec.SecretRef.Name, certObj.Namespace).Inc()
 
-	} else if (certObj.Status.Condition.Type == certsv1.CertificateProgressing) || (certObj.Status.Condition.Type == certsv1.CertificateDegraded) {
+	} else if (certObj.Status.Condition.Type == certsv1.CertificateTypeProgressing) || (certObj.Status.Condition.Type == certsv1.CertificateTypeDegraded) {
 		// Creation flow second attempt before marking status Degraded.
 		// Attempts to create Resource. If failed marks status as Degraded.
 		// Subsequent Reconcile loop with status Degraded will go through below block.
-		log.Info("creating resource")
+		log.V(1).Info("creating resource")
 		err := r.createResource(ctx, certObj)
 		if !errors.IsNotFound(err) {
-			log.Info("secret exists")
-			return ctrl.Result{}, fmt.Errorf("secret exists %+v", err)
+			log.V(1).Info("secret exists")
+			// Since secret exists, reconcile so that in next loop it gets marked as Available.
+			return ctrl.Result{Requeue: true}, nil
 		} else if err != nil {
 			log.Error(err, "unable to create resource")
-			if certObj.Status.Condition.Type != certsv1.CertificateDegraded {
-				if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateDegraded, certsv1.ReasonDegraded, err.Error()); err != nil {
+			if certObj.Status.Condition.Type != certsv1.CertificateTypeDegraded {
+				if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateTypeDegraded, certsv1.CertificateReasonDegraded, err.Error()); err != nil {
 					log.Error(err, "unable to update status type Degraded")
 					return ctrl.Result{}, fmt.Errorf("unable to update status type Degraded: %+v", err)
 				}
+				r.Recorder.Event(certObj, certsv1.EvenTypeWarning, certsv1.EventReasonFailed, fmt.Sprintf("failed creating secrets/%v", certObj.Spec.SecretRef.Name))
 			}
-			return ctrl.Result{}, fmt.Errorf("unable to create resource: %+v", err)
+			certStatus.WithLabelValues(certsv1.CertificateTypeDegraded, certObj.Name, certObj.Namespace).Inc()
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, fmt.Errorf("unable to create resource: %+v", err)
 		}
+		// Since resource creation i.e., secret is successful, increment the counter secretEvents.
+		secretEvents.WithLabelValues(certsv1.EventReasonCreated, certObj.Spec.SecretRef.Name, certObj.Namespace).Inc()
 	}
 
 	return ctrl.Result{}, nil
@@ -208,14 +263,14 @@ func (r *CertificateReconciler) updateCertStatus(ctx context.Context, certObj *c
 	certObj.Status.Condition.Status = metav1.ConditionTrue
 	certObj.Status.Condition.Reason = reason
 	certObj.Status.Condition.Message = message
-	if certObj.Status.Condition.Type == certsv1.CertificateAvailable {
+	if certObj.Status.Condition.Type == certsv1.CertificateTypeAvailable {
 		certObj.Status.SecretName = &certObj.Spec.SecretRef.Name
 	}
-	log.Info("updating status", "status", certObj.Status)
+	log.V(1).Info("updating status", "status", certObj.Status)
 	if err := r.Status().Update(ctx, certObj); err != nil {
 		return err
 	}
-	log.Info("status updated successfully")
+	log.V(1).Info("status updated successfully")
 	return nil
 }
 
@@ -230,7 +285,7 @@ func (r *CertificateReconciler) createResource(ctx context.Context, certObj *cer
 		log.Error(err, "unable to create secret")
 		return err
 	}
-	log.Info("created secret successfully", "secret", secretObj.Name)
+	log.V(1).Info("created secret successfully", "secret", secretObj.Name)
 	return nil
 }
 
@@ -294,7 +349,7 @@ func (r *CertificateReconciler) deleteResource(ctx context.Context, secretObj *c
 	if err := r.Delete(ctx, secretObj); err != nil {
 		return err
 	}
-	log.Info("deleted secret successfully", "secret", secretObj.Name)
+	log.V(1).Info("deleted secret successfully", "secret", secretObj.Name)
 	return nil
 }
 
@@ -311,7 +366,7 @@ func (r *CertificateReconciler) updateResource(ctx context.Context, secretObj *c
 		log.Error(err, "unable to update secret")
 		return err
 	}
-	log.Info("successfully updated secret", "secret", secretObj.Name)
+	log.V(1).Info("successfully updated secret", "secret", secretObj.Name)
 	return nil
 }
 
