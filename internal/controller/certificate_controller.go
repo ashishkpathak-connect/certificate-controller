@@ -67,7 +67,7 @@ func init() {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
 func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
-
+	// Create a custom resource certificates object.
 	certObj := &certsv1.Certificate{}
 
 	err := r.Get(ctx, req.NamespacedName, certObj)
@@ -79,9 +79,10 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		log.Error(err, "could not fetch certificate resource")
 		return ctrl.Result{}, fmt.Errorf("could not fetch certificate resource: %+v", err)
 	}
-
+	// Format finalizer.
 	finalizer := fmt.Sprintf("secrets/%v", certObj.Spec.SecretRef.Name)
 
+	// Create a secret object.
 	secretObj := &corev1.Secret{}
 
 	// Fetch secret
@@ -152,7 +153,7 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 			// Secret contents matches .spec of CR
 			if match {
-				log.V(0).Info("secret contents match .spec of certificates CR")
+				log.V(0).Info("secret contents match spec of certificates CR")
 				// Update status to available if not set else skip.
 				if (certObj.Status.Condition != nil) && (certObj.Status.Condition.Type != certsv1.CertificateTypeAvailable) {
 					if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateTypeAvailable, certsv1.CertificateReasonAvailable, "created secret"); err != nil {
@@ -168,7 +169,7 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			} else {
 				// Secret contents does not match .spec of CR
 				// Update secret
-				log.V(1).Info("secret contents does not match spec of certificates CR")
+				log.V(0).Info("secret contents does not match spec of certificates CR")
 				if err := r.updateCertStatus(ctx, certObj, certsv1.CertificateTypeProgressing, certsv1.CertificateReasonProgressing, "creating secret"); err != nil {
 					log.Error(err, "could not update progress status")
 					return ctrl.Result{}, fmt.Errorf("could not update progress status: %+v", err)
@@ -256,6 +257,8 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 }
 
+// updateCertStatus updates cert status.
+// This function is intended to be invoked by Reconcile method.
 func (r *CertificateReconciler) updateCertStatus(ctx context.Context, certObj *certsv1.Certificate, conditionType string, reason, message string) error {
 	log := log.FromContext(ctx)
 	certObj.Status.Condition.LastTransitionTime = metav1.Now()
@@ -274,6 +277,8 @@ func (r *CertificateReconciler) updateCertStatus(ctx context.Context, certObj *c
 	return nil
 }
 
+// createResource creates resource i.e., secret
+// This function is intended to be invoked by Reconcile method.
 func (r *CertificateReconciler) createResource(ctx context.Context, certObj *certsv1.Certificate) error {
 	log := log.FromContext(ctx)
 	certPEM, keyPEM, err := createSelfSignedCert(ctx, certObj)
@@ -289,7 +294,8 @@ func (r *CertificateReconciler) createResource(ctx context.Context, certObj *cer
 	return nil
 }
 
-// Generates a Self Signed Certificate and Private key based on .spec.dnsName and .spec.validity of CR
+// createSelfSignedCert generates a Self Signed Certificate and Private key
+// based on .spec.dnsName and .spec.validity of CR.
 func createSelfSignedCert(ctx context.Context, certObj *certsv1.Certificate) ([]byte, []byte, error) {
 	ssCertObj := &certs.SelfSignedCert{
 		Domain:   certObj.Spec.DNSName,
@@ -302,6 +308,7 @@ func createSelfSignedCert(ctx context.Context, certObj *certsv1.Certificate) ([]
 	return certPEM, keyPEM, nil
 }
 
+// setSecret sets up an in-memory secret object and return it.
 func setSecret(certObj *certsv1.Certificate, certPEM, keyPEM []byte) *corev1.Secret {
 	secretObj := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -323,6 +330,8 @@ func setSecret(certObj *certsv1.Certificate, certPEM, keyPEM []byte) *corev1.Sec
 	return secretObj
 }
 
+// validateResource validates the secret contents w.r.t .spec of certificates CR.
+// This function is intended to be invoked by Reconcile method.
 func validateResource(ctx context.Context, secretObj *corev1.Secret, certObj *certsv1.Certificate) (bool, error) {
 	// Read certificate
 	ssCert := &certs.SelfSignedCert{}
@@ -336,6 +345,8 @@ func validateResource(ctx context.Context, secretObj *corev1.Secret, certObj *ce
 	return false, nil
 }
 
+// Fetches the secret.
+// This function is intended to be invoked by Reconcile method.
 func (r *CertificateReconciler) getSecret(ctx context.Context, secretObj *corev1.Secret, namespace, name string) error {
 	err := r.Get(ctx, client.ObjectKey{
 		Namespace: namespace,
@@ -344,6 +355,8 @@ func (r *CertificateReconciler) getSecret(ctx context.Context, secretObj *corev1
 	return err
 }
 
+// Deletes a resource.
+// This function is intended to be invoked by Reconcile method.
 func (r *CertificateReconciler) deleteResource(ctx context.Context, secretObj *corev1.Secret) error {
 	log := log.FromContext(ctx)
 	if err := r.Delete(ctx, secretObj); err != nil {
@@ -353,6 +366,8 @@ func (r *CertificateReconciler) deleteResource(ctx context.Context, secretObj *c
 	return nil
 }
 
+// Updates a resource.
+// This function is intended to be invoked by Reconcile method.
 func (r *CertificateReconciler) updateResource(ctx context.Context, secretObj *corev1.Secret, certObj *certsv1.Certificate) error {
 	log := log.FromContext(ctx)
 	certPEM, keyPEM, err := createSelfSignedCert(ctx, certObj)
