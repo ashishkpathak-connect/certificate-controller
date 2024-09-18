@@ -121,10 +121,8 @@ func (s *SelfSignedCert) Read(ctx context.Context, secretObj *corev1.Secret) err
 	}
 
 	s.Domain = cert.Subject.CommonName
-	log.Info("domain", "domain", s.Domain)
 	validDays := (cert.NotAfter.Sub(cert.NotBefore).Hours()) / 24
 	s.Validity = fmt.Sprintf("%vd", int(validDays))
-	log.Info("validity", "validity", s.Validity)
 
 	return nil
 
