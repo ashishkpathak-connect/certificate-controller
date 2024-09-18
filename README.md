@@ -56,6 +56,8 @@ All these 3 fields are mandatory and validations are included in openAPIV3Schema
 - Custom metrics certStatus and secretEvents of type Counter are exposed.
 - A /readyz and /healthz endpoints are exposed at :8081 of certificate-controller which can be used to probe health check by endpoint monitoring systems like blackbox-exporter.
 
+>Note: Prometheus, cert-manager, network-policy etc are currently disabled.
+
 
 ## Getting Started
 
@@ -72,6 +74,7 @@ make
 ```
 
 ### To Deploy on the cluster
+
 **Build and push your image to the location specified by `IMG`:**
 
 ```sh
@@ -105,6 +108,7 @@ kubectl apply -k config/samples/
 ```
 
 ### To Uninstall
+
 **Delete the instances (CRs) from the cluster:**
 
 ```sh
@@ -152,4 +156,3 @@ Users can just run kubectl apply -f <URL for YAML BUNDLE> to install the project
 kubectl apply -f https://raw.githubusercontent.com/<org>/certificate-controller/<tag or branch>/dist/install.yaml
 ```
 
-[metav1.Condition]: <https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition>
