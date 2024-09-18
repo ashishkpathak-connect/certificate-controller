@@ -28,6 +28,7 @@ const (
 	PrivateKeyBitSize int = 2048
 )
 
+// Create generates a SelfSigned Certificate and Private Key.
 func (s *SelfSignedCert) Create(ctx context.Context, keySize int) ([]byte, []byte, error) {
 	log := log.FromContext(ctx)
 	privateKey, err := rsa.GenerateKey(rand.Reader, keySize)
@@ -99,6 +100,7 @@ func (s *SelfSignedCert) Create(ctx context.Context, keySize int) ([]byte, []byt
 	return certPEM.Bytes(), keyPEM.Bytes(), nil
 }
 
+// Read method reads a secret object and extracts dnsName and validity.
 func (s *SelfSignedCert) Read(ctx context.Context, secretObj *corev1.Secret) error {
 	log := log.FromContext(ctx)
 	certData, status := secretObj.Data["tls.crt"]
@@ -107,6 +109,8 @@ func (s *SelfSignedCert) Read(ctx context.Context, secretObj *corev1.Secret) err
 		log.Error(err, "certificate does not exist in secret")
 		return err
 	}
+
+	// Decode certificate and key from PEM format
 	block, _ := pem.Decode(certData)
 	if block == nil {
 		err := fmt.Errorf("error decoding PEM block")
@@ -114,6 +118,7 @@ func (s *SelfSignedCert) Read(ctx context.Context, secretObj *corev1.Secret) err
 		return err
 	}
 
+	// Parse certificate
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		log.Error(err, "unable to parse certificate")

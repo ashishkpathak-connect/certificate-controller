@@ -1,14 +1,14 @@
 # certificate-controller
 ## Overview
-The certificate-controller aims to solve generation of Self Signed TLS Certificates by automation. It adds new custom resource certificates(Kind: Certificate) to Kubernetes. 
+The certificate-controller aims to solve generation of Self Signed TLS Certificates by automation. It adds new custom resource certificates(Kind: Certificate) to Kubernetes.
 
 ## Description
-The certificate-controller manages creation/update/delete of custom resource Certificate on kubernetes and creates/updates/deletes a TLS type Secret containing Self Signed Certificate and Private Key in an automated way. The Secret can then be used by applications to secure their HTTP endpoints. It's a self-service way of requesting TLS certificates for application developers. 
+The certificate-controller manages creation/update/delete of custom resource certificates(kind: Certificate) on kubernetes and creates/updates/deletes a TLS type Secret containing Self Signed Certificate and Private Key in an automated way. The Secret can then be used by applications to secure their HTTP endpoints. It's a self-service way of requesting TLS certificates for application developers. 
 It was scaffolded using a modern framework kubebuilder and uses Ginkgo for [tests](internal/controller/certificate_controller_test.go)/[tests](internal/certs/selfsignedcert_test.go).
 
 ## Features
 - Supports Creation/Update/Deletion of TLS type Secret.
-- Supports Status as per [metav1.Condition].
+- Supports Status as per [metav1.Condition](https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition).
 - Supports Finalizers to ensure deletion of secret in case of Certificate delete or update.
 - Supports Emitting events for different [phases](api/v1/certificate_types.go) of Secret lifecycle. Visible in `kubectl describe certificates` output.
 - Supports Custom [metrics](internal/controller/certificate_controller.go) certStatus and secretEvents of type Counter to track certificates(Available/Degraded) and secrets(create/delete) respectively.
@@ -43,7 +43,7 @@ All these 3 fields are mandatory and validations are included in openAPIV3Schema
 - If its a match do nothing.
 
 #### Updating SecretRefName
-> Note: This would lead to Recreation of secret with the new name as specified by .spec.secretRef.name. Also finalizer is updated.
+> Note: This would lead to Recreation of secret with the new name as specified by .spec.secretRef.name i.e., old secret is removed and new is created. This helps in achieving memory efficiency. Also finalizer is updated.
 - When an existing certificates custom resource(kind: Certificate) .spec.secretRef.name is updated, it is detected by the controller.
 - The controller checks if the secret specified by .spec.secretRef.name of certificates exist. if not present does the below.
 - Checks if the old secret specified by .status.secretName is present in the cluster. If so, attempts to delete it. If unable to delete or not present, then it just proceeds to below.
