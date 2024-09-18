@@ -4,7 +4,7 @@ The certificate-controller aims to solve generation of Self Signed TLS Certifica
 
 ## Description
 The certificate-controller manages creation/update/delete of custom resource certificates(kind: Certificate) on kubernetes and creates/updates/deletes a TLS type Secret containing Self Signed Certificate and Private Key in an automated way. The Secret can then be used by applications to secure their HTTP endpoints. It's a self-service way of requesting TLS certificates for application developers. 
-It was scaffolded using a modern framework kubebuilder and uses Ginkgo for [tests](internal/controller/certificate_controller_test.go)/[tests](internal/certs/selfsignedcert_test.go).
+It was scaffolded using a modern framework kubebuilder and uses Ginkgo for [tests](internal/controller/certificate_controller_test.go)/[tests](internal/certs/selfsignedcert_test.go). It adopts best practises from Kubernetes API conventions whilst tailoring to our requirement.
 
 ## Features
 - Supports Creation/Update/Deletion of TLS type Secret.
@@ -20,7 +20,7 @@ It was scaffolded using a modern framework kubebuilder and uses Ginkgo for [test
 - Create a certificates custom resource(kind: Certificate) including .spec.dnsName, .spec.validity and .spec.secretRef.name
 All these 3 fields are mandatory and validations are included in openAPIV3Schema for:
    - .spec.dnsName and .spec.secretRef.name should be a valid DNS subdomain name.
-   - .spec.validity should be a string containing a sequence of one or more digits followed by d.
+   - .spec.validity should be a string containing a sequence of one or more digits followed by letter d.
 - The Kubernetes APIServer validates the above 3 fields and creates a certificates custom resource upon successful validation.
 - This is detected as an event by certificate-controller and processes it. 
 - The controller first checks if the secret specified by .spec.secretRef.name exists in the cluster in the desired namespace. If so, match contents of the secret(actual) vs spec of certificates(desired). If they match, check if .status.condition.type of certificates is "Available". If "Available", do nothing else update to "Available". If the contents of actuals vs desired do not match then process as below.
