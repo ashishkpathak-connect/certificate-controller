@@ -2,6 +2,9 @@
 ## Overview
 The certificate-controller aims to solve generation of Self Signed TLS Certificates by automation. It adds new custom resource certificates(Kind: Certificate) to Kubernetes.
 
+## Author
+Ashish K Pathak
+
 ## Description
 The certificate-controller manages creation/update/delete of custom resource certificates(kind: Certificate) on kubernetes and creates/updates/deletes a TLS type Secret containing Self Signed Certificate and Private Key in an automated way. The Secret can then be used by applications to secure their HTTP endpoints. It's a self-service way of requesting TLS certificates for application developers. 
 It was scaffolded using a modern framework kubebuilder and uses Ginkgo for [tests](internal/controller/certificate_controller_test.go)/[tests](internal/certs/selfsignedcert_test.go). It adopts best practises from Kubernetes API conventions whilst tailoring to our requirement.
@@ -9,10 +12,10 @@ It was scaffolded using a modern framework kubebuilder and uses Ginkgo for [test
 ## Features
 - Supports Creation/Update/Deletion of TLS type Secret.
 - Supports Status as per [metav1.Condition](https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition).
-- Supports Finalizers to ensure deletion of secret in case of Certificate delete or update.
+- Supports Finalizers to ensure deletion of secret in case of Certificate delete or update. This helps in memory efficiency by cleaning up the secret when the certificate is deleted or the secret name is updated.
 - Supports Emitting events for different [phases](api/v1/certificate_types.go) of Secret lifecycle. Visible in `kubectl describe certificates` output.
 - Supports Custom [metrics](internal/controller/certificate_controller.go) certStatus and secretEvents of type Counter to track certificates(Available/Degraded) and secrets(create/delete) respectively.
-- Supports custom column "STATUS" in `kubectl get certificates` output. 
+- Supports custom column "STATUS" in `kubectl get certificates` output.
 
 ## Working Details
 
