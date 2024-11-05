@@ -3,7 +3,7 @@
 The certificate-controller aims to solve generation of Self Signed TLS Certificates by automation. It adds new custom resource certificates(Kind: Certificate) to Kubernetes.
 
 ## Author
-Ashish K Pathak
+[Ashish K Pathak](https://github.com/ashishkpathak-connect)
 
 ## Description
 The certificate-controller manages creation/update/delete of custom resource certificates(kind: Certificate) on kubernetes and creates/updates/deletes a TLS type Secret containing Self Signed Certificate and Private Key in an automated way. The Secret can then be used by applications to secure their HTTP endpoints. It's a self-service way of requesting TLS certificates for application developers. 
